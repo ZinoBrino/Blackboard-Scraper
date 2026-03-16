@@ -1,0 +1,23 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Output & user data (never commit scraped content)
+output/
+config.json
+.scraper_config.json
+cookies.txt
+.env
+.env.*
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
