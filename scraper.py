@@ -6,6 +6,7 @@ Download your own course content from vle.aston.ac.uk
 Usage:
   python scraper.py               — interactive (opens browser login)
   python scraper.py <course_url>  — if you already have BLACKBOARD_COOKIES set
+  python scraper.py --all         — scrape ALL enrolled courses (all years)
 
 Output: ./output/<course_id>/
   api_content.json        — full raw data
@@ -157,6 +158,18 @@ def verify_login(base_url: str, cookies_str: str) -> bool:
         return False
 
 
+def fetch_user_courses(sess: requests.Session, base_url: str) -> list[dict]:
+    """Fetch all courses the current user is enrolled in."""
+    try:
+        data = api_get(sess, base_url, "/users/me/courses")
+        if not data:
+            return []
+        results = data.get("results", []) if isinstance(data, dict) else data
+        return [r for r in results if isinstance(r, dict) and r.get("courseId")]
+    except Exception:
+        return []
+
+
 def extract_course_id(s: str) -> str | None:
     """Extract course ID from URL or raw ID. E.g. _62382_1"""
     m = re.search(r"/courses/(_[^/?#]+)", s)
@@ -169,8 +182,8 @@ def extract_course_id(s: str) -> str | None:
 
 # ─── Interactive wizard ───────────────────────────────────────────────────────
 
-def run_wizard() -> tuple[str, str, str]:
-    """Interactive setup. Returns (base_url, cookies_str, course_id).
+def run_wizard(scan_all: bool = False) -> tuple[str, str, str | None]:
+    """Interactive setup. Returns (base_url, cookies_str, course_id or None for all).
     Cookies are NEVER written to disk.
 
     The browser stays open through both steps so the user can copy the
@@ -248,15 +261,20 @@ def run_wizard() -> tuple[str, str, str]:
             # ── Step 2: get course URL while browser is still open ────────
             step(2, "Which course?")
             print()
-            print("  Navigate to your course in the browser that's still open.")
-            print("  Then copy the URL from the address bar and paste it here.")
+            if scan_all:
+                print("  Press Enter to scrape ALL your courses, or paste one course URL.")
+            else:
+                print("  Navigate to your course in the browser that's still open.")
+                print("  Then copy the URL from the address bar and paste it here.")
             print()
             hint = f" {DIM}[last: {last_course}]{RESET}" if last_course else ""
             print(f"  Course URL or ID{hint}: ", end="", flush=True)
-            course_in = input().strip() or last_course
+            course_in = input().strip()
+            if not course_in and not scan_all:
+                course_in = last_course
 
-            # Try to grab the current page URL as a fallback hint
-            if not course_in:
+            # Try to grab the current page URL as a fallback hint (unless scan_all and empty)
+            if not course_in and not scan_all:
                 try:
                     current_url = page.url
                     if extract_course_id(current_url):
@@ -283,16 +301,27 @@ def run_wizard() -> tuple[str, str, str]:
 
         step(2, "Which course?")
         print()
-        print("  Paste a course URL or ID (_12345_1).")
+        if scan_all:
+            print("  Type 'all' to scrape ALL your courses, or paste one course URL.")
+        else:
+            print("  Type 'all' or paste a course URL or ID (_12345_1).")
         print()
         hint = f" {DIM}[last: {last_course}]{RESET}" if last_course else ""
         print(f"  Course URL or ID{hint}: ", end="", flush=True)
-        course_in = input().strip() or last_course
+        course_in = input().strip()
+        if not course_in and not scan_all:
+            course_in = last_course
 
     # ── Validate course ID ────────────────────────────────────────────────
-    if not course_in:
+    if not course_in and not scan_all:
         err("No course provided.")
         sys.exit(1)
+
+    # "all" or Enter (when --all) = scrape all courses
+    if course_in.lower() == "all" or (scan_all and not course_in):
+        ok("Will scrape ALL enrolled courses")
+        print()
+        return VLE_URL, cookies_str, None
 
     course_id = extract_course_id(course_in)
     if not course_id:
@@ -601,6 +630,7 @@ def main():
     args  = [a for a in raw if not a.startswith("--")]
 
     dry_run = "--dry-run" in flags
+    scan_all = "--all" in flags
 
     # Non-interactive mode: course ID as arg, cookies from env
     if args and "--wizard" not in flags:
@@ -614,17 +644,59 @@ def main():
             err("Set the BLACKBOARD_COOKIES environment variable, or run without arguments.")
             sys.exit(1)
         base_url = VLE_URL
+    elif scan_all and os.environ.get("BLACKBOARD_COOKIES"):
+        # --all with cookies: skip wizard, fetch courses directly
+        base_url = VLE_URL
+        cookies_str = os.environ.get("BLACKBOARD_COOKIES", "")
+        course_id = None
     else:
-        base_url, cookies_str, course_id = run_wizard()
+        base_url, cookies_str, course_id = run_wizard(scan_all=scan_all)
 
     if not verify_login(base_url, cookies_str):
         print()
         err("Login verification failed. Run again and log in properly.")
         sys.exit(1)
 
+    sess = make_session(base_url, cookies_str)
+
+    # If --all, fetch all courses and scrape each
+    if course_id is None:
+        info("Fetching your enrolled courses...")
+        courses = fetch_user_courses(sess, base_url)
+        if not courses:
+            err("No courses found or API returned empty.")
+            sys.exit(1)
+        ok(f"Found {len(courses)} course(s)")
+        print()
+        total_files = 0
+        t_start = time.time()
+        for i, c in enumerate(courses):
+            cid = c.get("courseId", "")
+            name = c.get("name", cid)
+            print(f"  {BOLD}[{i + 1}/{len(courses)}]{RESET} {name} ({cid})")
+            out_dir = Path("output") / cid
+            out_dir.mkdir(parents=True, exist_ok=True)
+            counts = {"files": 0, "file_err": 0}
+            try:
+                tree = fetch_content_tree(sess, base_url, cid)
+                with open(out_dir / "api_content.json", "w", encoding="utf-8") as f:
+                    json.dump({"courseId": cid, "content": tree}, f, indent=2, ensure_ascii=False)
+                save_tree(sess, tree, out_dir, counts)
+                total_files += counts["files"]
+                dim(f"        {counts['files']} files")
+            except Exception as e:
+                warn(f"        Skipped: {e}")
+        elapsed = time.time() - t_start
+        print()
+        print(f"  {'─' * 40}")
+        ok(f"Done in {elapsed:.1f}s — {total_files} files across {len(courses)} courses")
+        print()
+        print(f"  Saved to: {BOLD}{Path('output').absolute()}{RESET}")
+        print()
+        return
+
     out_dir = Path("output") / course_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    sess = make_session(base_url, cookies_str)
 
     if dry_run:
         print()

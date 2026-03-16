@@ -77,11 +77,20 @@ python scraper.py "https://vle.aston.ac.uk/ultra/courses/_12345_1/outline"
 
 (Needs `BLACKBOARD_COOKIES` env var — see manual cookie method below.)
 
+### Scrape all your courses (all years)
+
+```bash
+python scraper.py --all
+```
+
+Press Enter when asked for a course URL to scrape every course you're enrolled in. With cookies in env: `BLACKBOARD_COOKIES='...' python scraper.py --all`
+
 ### Flags
 
 ```
---dry-run     Show what would happen without downloading anything
---wizard     Force interactive mode even when BLACKBOARD_COOKIES is set
+--all       Scrape all enrolled courses (not just one)
+--dry-run   Show what would happen without downloading anything
+--wizard    Force interactive mode even when BLACKBOARD_COOKIES is set
 ```
 
 ---
